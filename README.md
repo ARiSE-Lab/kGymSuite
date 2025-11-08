@@ -4,6 +4,10 @@
 
 A distributed kernel build, test, and crash reproduction framework for Linux kernel research and security analysis.
 
+### Other Related Folders
+1. [Kernel Playground](https://github.com/Alex-Mathai-98/kGym-Kernel-Playground)
+2. [kGym - For Only Google Cloud Platform](https://github.com/Alex-Mathai-98/kGym-Kernel-Gym)
+
 ## 📋 Overview
 
 ![kGymSuite Architecture](./misc/arch.png)
