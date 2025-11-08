@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kgym-core"
+description = "kGym Core Library"
+readme = "README.md"
+requires-python = ">=3.11"
+version = "v1.0.0"
+dependencies = [
+    "pydantic",
+    "aio_pika==9.5.0",
+    "google-auth",
+    "google-cloud-storage"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["KBDr.*"]  # ["*"] by default

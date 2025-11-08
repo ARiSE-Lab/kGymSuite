@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kgym-builder"
+description = "kGym Kernel Builder"
+readme = "README.md"
+requires-python = ">=3.11"
+version = "v1.0.0"
+dependencies = [
+    "kgym-core",
+    "kgym-client",
+    "aiofiles"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["KBDr.*"]  # ["*"] by default

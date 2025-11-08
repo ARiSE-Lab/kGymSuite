@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kgym-vmmanager"
+description = "kGym VMManager"
+readme = "README.md"
+requires-python = ">=3.11"
+version = "v1.0.0"
+dependencies = [
+    "kgym-core",
+    "kgym-client",
+    "google-cloud-compute",
+    "aiofiles"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["KBDr.*"]  # ["*"] by default

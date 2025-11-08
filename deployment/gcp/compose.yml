@@ -1,0 +1,101 @@
+# compose.yml
+services:
+  kmq:
+    image: "kgym-mq:${DEPLOYMENT}"
+    build:
+      context: ./
+      dockerfile: docker/kgym-mq.Dockerfile
+    restart: unless-stopped
+    ports:
+      - 5672:5672
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 5s
+      timeout: 5s
+      retries: 3
+    networks:
+      - kgym-default
+  kscheduler:
+    image: "kgym-scheduler:${DEPLOYMENT}"
+    build:
+      context: ./
+      dockerfile: docker/kgym-scheduler.Dockerfile
+      target: release
+    restart: unless-stopped
+    ports:
+      - 8000:8000
+    environment:
+      - KBDR_SCHEDULER_CONFIG=/root/config.json
+    env_file:
+      - path: ./kgym-runner.env
+        required: true
+    volumes:
+      - ./kscheduler-db:/root/scheduler-db
+      - ./config.json:/root/config.json
+    depends_on:
+      kmq:
+        condition: service_healthy
+    networks:
+      - kgym-default
+  kdashboard:
+    image: "kgym-dashboard:${DEPLOYMENT}"
+    build:
+      context: ./
+      dockerfile: docker/kgym-dashboard.Dockerfile
+    restart: unless-stopped
+    ports:
+      - 3000:3000
+    volumes:
+      - ./config.json:/app/public/config.json
+    networks:
+      - kgym-default
+  kvmmanager:
+    image: "kgym-vmmanager:${DEPLOYMENT}"
+    build:
+      context: ./
+      dockerfile: docker/kgym-vmmanager.Dockerfile
+      target: release
+    deploy:
+      mode: replicated
+      replicas: 5
+    restart: unless-stopped
+    devices:
+      - /dev/kvm:/dev/kvm
+    env_file:
+      - path: ./kgym-runner.env
+        required: true
+    networks:
+      - kgym-default
+  kbuilder:
+    image: "kgym-builder:${DEPLOYMENT}"
+    build:
+      context: ./
+      dockerfile: docker/kgym-builder.Dockerfile
+      target: release
+    restart: unless-stopped
+    env_file:
+      - path: ./kgym-runner.env
+        required: true
+    volumes:
+      - /dev:/dev
+      - ./kbuilder-repo:/mnt/repo
+    privileged: true
+    networks:
+      - kgym-default
+  kprebuilder:
+    image: "kgym-prebuilder:${DEPLOYMENT}"
+    build:
+      context: ./
+      dockerfile: docker/kgym-prebuilder.Dockerfile
+      target: release
+    restart: unless-stopped
+    env_file:
+      - path: ./kgym-runner.env
+        required: true
+    networks:
+      - kgym-default
+networks:
+  kgym-default:
+    driver: bridge
+    driver_opts:
+      com.docker.network.driver.mtu: 1460

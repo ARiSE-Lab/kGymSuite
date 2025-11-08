@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kgym-scheduler"
+description = "kGym Scheduler"
+readme = "README.md"
+requires-python = ">=3.11"
+version = "v1.0.0"
+dependencies = [
+    "kgym-core",
+    "aio_pika==9.5.0",
+    "uvicorn",
+    "fastapi",
+    "aiosqlite",
+    "google-auth",
+    "aiofiles"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["KBDr.*"]  # ["*"] by default
