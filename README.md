@@ -104,7 +104,7 @@ job = kJobRequest(
             reproducer=Reproducer(
                 reproducerType="c",
                 reproducerText="/* C reproducer code */",
-                syzkallerVersion="latest"
+                syzkallerCheckout="latest"
             ),
             image=0,  # Use output from first worker (kbuilder)
             machineType="qemu:2-4096"  # 2 CPUs, 4096MB RAM

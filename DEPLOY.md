@@ -143,7 +143,7 @@ Replace `your-project-id` and `your-repo` with your GCP project ID and Artifact 
 From the repository root:
 
 ```bash
-docker compose -f ./deployment/example/compose.yml \
+DEPLOYMENT=example docker compose -f ./deployment/example/compose.yml \
   --project-directory . \
   build
 ```
@@ -159,7 +159,7 @@ gcloud auth configure-docker <GCP Artifact Registry Server, e.g. us-docker.pkg.d
 #### 2.3 Push Images to Artifact Registry
 
 ```bash
-docker compose -f ./deployment/example/compose.yml push
+DEPLOYMENT=example docker compose -f ./deployment/example/compose.yml push
 ```
 
 ### Step 3: Deploy to GCP VMs
@@ -258,17 +258,17 @@ Review and customize `deployment/local/config.json` if needed. The default confi
 From the repository root, build all services:
 
 ```bash
-docker compose -f ./deployment/local/compose.yml --project-directory . build
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml --project-directory . build
 ```
 
 ### Step 5: Start Services
 
 ```bash
 # Core services
-docker compose -f ./deployment/local/compose.yml up -d kmq kscheduler kdashboard
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml up -d kmq kscheduler kdashboard
 
 # Add workers
-docker compose -f ./deployment/local/compose.yml up -d kbuilder kvmmanager kprebuilder
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml up -d kbuilder kvmmanager kprebuilder
 ```
 
 ### Step 6: Verify Deployment
@@ -276,14 +276,14 @@ docker compose -f ./deployment/local/compose.yml up -d kbuilder kvmmanager kpreb
 Check running services:
 
 ```bash
-docker compose -f ./deployment/local/compose.yml ps
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml ps
 ```
 
 View logs:
 
 ```bash
-docker compose -f ./deployment/local/compose.yml logs -f kscheduler
-docker compose -f ./deployment/local/compose.yml logs -f kbuilder
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml logs -f kscheduler
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml logs -f kbuilder
 ```
 
 Access services:
@@ -340,16 +340,16 @@ services:
 #### 2. Build and Push
 
 ```bash
-docker compose -f ./deployment/local/compose.yml --project-directory . build
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml --project-directory . build
 docker login
-docker compose -f ./deployment/local/compose.yml push
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml push
 ```
 
 #### 3. Pull and Run on Target Machine
 
 ```bash
-docker compose -f ./deployment/local/compose.yml pull
-docker compose -f ./deployment/local/compose.yml up -d <services>
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml pull
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml up -d <services>
 ```
 
 **Note:** Pre-built images will be available in future releases.
@@ -493,12 +493,12 @@ See `deployment/gcp/config.json` for the current list of backport commits.
 
 ```bash
 # Build new images
-docker compose -f ./deployment/example/compose.yml \
+DEPLOYMENT=example docker compose -f ./deployment/example/compose.yml \
   --project-directory . \
   build
 
 # Push to registry
-docker compose -f ./deployment/example/compose.yml push
+DEPLOYMENT=example docker compose -f ./deployment/example/compose.yml push
 
 # Rolling upgrade
 python kgym.py upgrade example
@@ -508,11 +508,11 @@ python kgym.py upgrade example
 
 ```bash
 # Rebuild images
-docker compose -f ./deployment/local/compose.yml --project-directory . build
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml --project-directory . build
 
 # Restart services
-docker compose -f ./deployment/local/compose.yml down
-docker compose -f ./deployment/local/compose.yml up -d
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml down
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml up -d
 ```
 
 Or using kgym.py:
@@ -526,13 +526,13 @@ python kgym.py upgrade local
 #### Local Deployment
 
 ```bash
-docker compose -f ./deployment/local/compose.yml down
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml down
 ```
 
 To also remove volumes:
 
 ```bash
-docker compose -f ./deployment/local/compose.yml down -v
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml down -v
 ```
 
 Or using kgym.py:
@@ -555,14 +555,14 @@ This gracefully shuts down all services across all configured servers.
 
 ```bash
 # All services
-docker compose -f ./deployment/local/compose.yml logs -f
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml logs -f
 
 # Specific service
-docker compose -f ./deployment/local/compose.yml logs -f kscheduler
-docker compose -f ./deployment/local/compose.yml logs -f kbuilder
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml logs -f kscheduler
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml logs -f kbuilder
 
 # Last N lines
-docker compose -f ./deployment/local/compose.yml logs --tail=100 kvmmanager
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml logs --tail=100 kvmmanager
 ```
 
 #### GCP Deployment
@@ -584,7 +584,7 @@ docker logs -f kgym-builder
 Scale using docker compose:
 
 ```bash
-docker compose -f ./deployment/local/compose.yml up -d --scale kvmmanager=10
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml up -d --scale kvmmanager=10
 ```
 
 Or edit `deployment/local/compose.yml`:
@@ -632,13 +632,13 @@ sudo systemctl start docker
 Validate compose file:
 
 ```bash
-docker compose -f ./deployment/local/compose.yml config
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml config
 ```
 
 Check logs for errors:
 
 ```bash
-docker compose -f ./deployment/local/compose.yml logs kscheduler
+DEPLOYMENT=local docker compose -f ./deployment/local/compose.yml logs kscheduler
 ```
 
 ### Workers Not Processing Jobs
