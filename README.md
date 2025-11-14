@@ -254,7 +254,7 @@ Chenxi Huang, Alex Mathai, Suwei Ma and Rohan Timmaraju
 ```
 @misc{mathai2025crashfixercrashresolutionagent,
       title={CrashFixer: A crash resolution agent for the Linux kernel}, 
-      author={Alex Mathai and Chenxi Huang and Suwei Ma and Jihwan Kim and Hailie Mitchell and Aleksandr Nogikh and Petros Maniatis and Franjo Ivančić and Junfeng Yang and Baishakhi Ray},
+      author={Alex Mathai and Chenxi Huang and Suwei Ma and Jihwan Kim and Hailie Mitchell and Aleksandr Nogikh and Petros Maniatis and Franjo Ivan\v{c}i\'{c} and Junfeng Yang and Baishakhi Ray},
       year={2025},
       eprint={2504.20412},
       archivePrefix={arXiv},
@@ -268,7 +268,7 @@ Chenxi Huang, Alex Mathai, Suwei Ma and Rohan Timmaraju
 ```
 @misc{mathai2024kgymplatformdatasetbenchmark,
       title={KGym: A Platform and Dataset to Benchmark Large Language Models on Linux Kernel Crash Resolution}, 
-      author={Alex Mathai and Chenxi Huang and Petros Maniatis and Aleksandr Nogikh and Franjo Ivancic and Junfeng Yang and Baishakhi Ray},
+      author={Alex Mathai and Chenxi Huang and Petros Maniatis and Aleksandr Nogikh and Franjo Ivan\v{c}i\'{c} and Junfeng Yang and Baishakhi Ray},
       year={2024},
       eprint={2407.02680},
       archivePrefix={arXiv},
