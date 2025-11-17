@@ -4,6 +4,11 @@
 
 A distributed kernel build, test, and crash reproduction framework for Linux kernel research and security analysis.
 
+### What's New?
+
+- **Blazing fast patch evaluation** with prebuilt SuiteCache (average speedup of 42.69%).
+- **Quickly checking if a batch of patches are compilable**, without building the whole kernel (2-3 seconds for validating each patch).
+
 ### Other Related Folders
 1. [Kernel Playground](https://github.com/Alex-Mathai-98/kGym-Kernel-Playground)
 2. [kGym - For Only Google Cloud Platform](https://github.com/Alex-Mathai-98/kGym-Kernel-Gym)
