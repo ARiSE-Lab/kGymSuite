@@ -22,6 +22,14 @@ async def prepare_syzkaller(syzkaller_path: str, checkout_name: str, rollback: b
     code = await proc.wait()
     if code != 0:
         raise JobExceptionError('kvmmanager.SyzkallerBuildError', f'Failed to fetch the latest syzkaller')
+    # git checkout to latest first;
+    proc = await asp.create_subprocess_exec(
+        'git', 'checkout', latest_tag, stdin=asp.DEVNULL, stderr=asp.DEVNULL,
+        stdout=asp.DEVNULL, cwd=syzkaller_path
+    )
+    code = await proc.wait()
+    if code != 0:
+        raise JobExceptionError('kvmmanager.SyzkallerBuildError', f'Failed to pre-checkout the latest syzkaller at {latest_tag}')
     # git pull;
     org = 'origin'
     if latest_tag == 'master':

@@ -77,7 +77,10 @@ class TaskBase:
             await self.on_clean()
         except:
             pass
-        await run_async(shutil.rmtree, self.cwd, ignore_errors=True)
+        try:
+            await run_async(shutil.rmtree, self.cwd, ignore_errors=True)
+        except:
+            pass
 
     async def run(self) -> JobResult:
         # prepare one just in case;
@@ -104,7 +107,10 @@ class TaskBase:
             self.task = None
             await self._clean()
             self.pending_result.workerException = WorkerException(
-                code=e.args[0],
+                code=e.args[0] if (
+                    len(e.args) == 1 and
+                    e.args[0] in (WorkerAbortedExceptionCode, WorkerYieldedExceptionCode)
+                ) else WorkerGeneralExceptionCode,
                 exceptionType=get_type_fullname(type(e)),
                 traceback=traceback.format_exc()
             )
