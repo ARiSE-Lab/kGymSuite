@@ -48,6 +48,12 @@ from ..kclient_models.kvmmanager import *
 from ..kclient_models.kbuilder import *
 from .models import kJobRequest, kJobContext
 import litellm
+from tqdm import tqdm
+from pathlib import Path
+import json
+import time
+import aiofiles
+from gc import collect
 
 class SyzbotGitCommit(BaseModel):
     """Git commit reference from Syzbot bug report.
@@ -196,62 +202,167 @@ class SyzbotDataset(RootModel):
         from datasets import load_dataset
         return cls.model_validate(load_dataset(repository, config)['train'])
 
+    def get(self, bug_id: str) -> SyzbotData | None:
+        ret = list(filter(lambda x: x.bugId == bug_id, self.root))
+        if len(ret) > 0:
+            return ret[0]
+
 class SyzbotDriver:
     def __init__(self):
         from aiolimiter import AsyncLimiter
         self._session = requests.Session()
+        self._session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.102 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+            'sec-ch-ua': '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+        })
         self._syzbot_url = 'https://syzkaller.appspot.com'
-        self._limiter = AsyncLimiter(1, 10)
+        self._limiter = AsyncLimiter(8, 15)
 
-    async def _sess_get(self, **kwargs) -> requests.Response:
-        async with self._limiter:
-            print('_sess_get', kwargs)
-            return await run_async(self._session.get, **kwargs)
+        # Initialize cache
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._cache_loaded = False
+        cache_dir = Path.home() / '.kgym_cache'
+        cache_dir.mkdir(exist_ok=True)
+        self._cache_file = cache_dir / f'{self.__class__.__name__}.json'
+
+    async def _load_cache(self):
+        """Load cache from disk if it exists."""
+        if self._cache_loaded:
+            return
+
+        if self._cache_file.exists():
+            try:
+                async with aiofiles.open(self._cache_file, 'r') as f:
+                    content = await f.read()
+                    self._cache = json.loads(content)
+            except (json.JSONDecodeError, IOError):
+                # If cache file is corrupted, start with empty cache
+                self._cache = {}
+
+        self._cache_loaded = True
+
+    async def _save_cache(self):
+        """Save cache to disk asynchronously."""
+        try:
+            async with aiofiles.open(self._cache_file, 'w') as f:
+                await f.write(json.dumps(self._cache, indent=2))
+        except IOError:
+            # Silently ignore write errors
+            pass
+
+    async def _sess_get(self, ttl: int = 2**64, **kwargs) -> requests.Response:
+        """Fetch URL with optional caching.
+
+        Args:
+            ttl: Time-to-live in seconds. If > 0, cache the response.
+                 If 0, always fetch fresh data.
+            **kwargs: Arguments passed to requests.Session.get()
+
+        Returns:
+            requests.Response object
+        """
+        # Load cache if not already loaded
+        await self._load_cache()
+
+        url = kwargs.get('url', '')
+
+        # Check cache if TTL is specified
+        if ttl > 0 and url in self._cache:
+            cached_entry = self._cache[url]
+            retrieved_time = cached_entry.get('retrieved_time', 0)
+            current_time = time.time()
+
+            # If cache is still valid, return cached response
+            if current_time - retrieved_time < ttl and cached_entry.get('status_code', 429) == 200:
+                # Create a mock response object with cached content
+                response = requests.Response()
+                response._content = cached_entry['content'].encode('utf-8')
+                response.status_code = cached_entry.get('status_code', 200)
+                response.headers.update(cached_entry.get('headers', {}))
+                response.url = url
+                return response
+
+        response = None
+        # Fetch from network
+        for _ in range(3):
+            async with self._limiter:
+                response = await run_async(self._session.get, **kwargs)
+            if response.status_code != 200:
+                await asyncio.sleep(2)
+                continue
+            else:
+                break
+
+        # Update cache always;
+        self._cache[url] = {
+            'content': response.text,
+            'retrieved_time': time.time(),
+            'status_code': response.status_code,
+            'headers': dict(response.headers)
+        }
+        await self._save_cache()
+
+        return response
 
 class SyzbotPopulator(SyzbotDriver):
 
     def __init__(
         self,
-        bug_type: Literal['open', 'fixed'],
         repository_map: dict[str, str]
     ):
         super().__init__()
-        self.bug_type = bug_type
         self.repository_map = repository_map
+        self._fetch_sem = asyncio.Semaphore(4)
 
     async def fetch_orphan(self, repo_path: str, commit_id: str):
-        return await ((await asp.create_subprocess_exec(
+        code = await ((await asp.create_subprocess_exec(
             'git',
-            'fetch',
-            'origin',
-            f'{commit_id}:refs/remotes/origin/orphaned-commits/{commit_id}',
+            'cat-file',
+            '-e',
+            commit_id,
             cwd=repo_path,
             stdin=asp.DEVNULL)).wait())
+        if code != 0:
+            return await ((await asp.create_subprocess_exec(
+                'git',
+                'fetch',
+                'origin',
+                f'{commit_id}:refs/remotes/origin/orphaned-commits/{commit_id}',
+                cwd=repo_path,
+                stdin=asp.DEVNULL)).wait())
+        else:
+            return 0
 
     async def _populate_syzbot_info(self, data: SyzbotData):
-        if data.crashes and len(data.crashes) > 0:
-            data.crashes = data.crashes[:1]
-            crash = data.crashes[0]
-            if crash.kernelConfigLink and not crash.kernelConfig:
-                crash.kernelConfig = (await self._sess_get(
-                    url=self._syzbot_url + crash.kernelConfigLink
-                )).text
-            if crash.cReproducerLink and not crash.cReproducer:
-                crash.cReproducer = (await self._sess_get(
-                    url=self._syzbot_url + crash.cReproducerLink
-                )).text
-            if crash.syzReproducerLink and not crash.syzReproducer:
-                crash.syzReproducer = (await self._sess_get(
-                    url=self._syzbot_url + crash.syzReproducerLink
-                )).text
-            if crash.crashReportLink and not data.rawCrashReport:
-                data.rawCrashReport = (await self._sess_get(
-                    url=self._syzbot_url + crash.crashReportLink
-                )).text
+        async with self._fetch_sem:
+            if data.crashes and len(data.crashes) > 0:
+                data.crashes = data.crashes[:1]
+                crash = data.crashes[0]
+                if crash.kernelConfigLink and not crash.kernelConfig:
+                    crash.kernelConfig = (await self._sess_get(
+                        url=self._syzbot_url + crash.kernelConfigLink
+                    )).text
+                if crash.cReproducerLink and not crash.cReproducer:
+                    crash.cReproducer = (await self._sess_get(
+                        url=self._syzbot_url + crash.cReproducerLink
+                    )).text
+                if crash.syzReproducerLink and not crash.syzReproducer:
+                    crash.syzReproducer = (await self._sess_get(
+                        url=self._syzbot_url + crash.syzReproducerLink
+                    )).text
+                if crash.crashReportLink and not data.rawCrashReport:
+                    data.rawCrashReport = (await self._sess_get(
+                        url=self._syzbot_url + crash.crashReportLink
+                    )).text
 
     async def _fetch_commits(self, repo_path: str, commits: List[str]):
-        for cmt in commits:
-            await self.fetch_orphan(repo_path, cmt)
+        async with self._fetch_sem:
+            for cmt in commits:
+                await self.fetch_orphan(repo_path, cmt)
 
     async def get_repository_urls(self, batch: List[SyzbotData]) -> List[str]:
         ret = set()
@@ -279,10 +390,9 @@ class SyzbotPopulator(SyzbotDriver):
     async def populate_batch(self, _batch: SyzbotDataset) -> SyzbotDataset:
         batch = deepcopy(_batch).root
 
-        tasks = []
-
-        for data in batch:
-            tasks.append(asyncio.create_task(self._populate_syzbot_info(data)))
+        async with asyncio.TaskGroup() as tg:
+            for data in batch:
+                tg.create_task(self._populate_syzbot_info(data))
 
         commits_to_load = defaultdict(list)
         commits = dict[str, Commit]()
@@ -319,7 +429,7 @@ class SyzbotPopulator(SyzbotDriver):
         def _populate_commits():
             for git_url in commits_to_load:
                 local_repo_path = self.repository_map[git_url]
-                repo = Repository(path_to_repo=local_repo_path, only_commits=commits_to_load[git_url])
+                repo = Repository(path_to_repo=local_repo_path, only_commits=commits_to_load[git_url], include_refs=True)
                 for cmt in repo.traverse_commits():
                     commits[cmt.hash] = cmt
         await run_async(_populate_commits)
@@ -338,7 +448,7 @@ class SyzbotPopulator(SyzbotDriver):
 
                 if len(commit.parents) > 0:
                     data.parentOfFixCommit = commit.parents[0]
-                data.patchCommitDate = commit.committer_date
+                data.patchCommitDate = (commit.committer_date - commit.committer_date.utcoffset()).replace(tzinfo=None)
                 data.patchMessage = commit.msg
                 data.patchModifiedFunctions = []
                 data.patchModifiedFiles = []
@@ -356,14 +466,11 @@ class SyzbotPopulator(SyzbotDriver):
                 if git_url not in self.repository_map:
                     continue
                 commit = commits[cmt.hashValue]
-                data.causeCommitDate = commit.committer_date
+                data.causeCommitDate = (commit.committer_date - commit.committer_date.utcoffset()).replace(tzinfo=None)
                 data.causeModifiedFunctions = []
                 for m in commit.modified_files:
                     data.causeModifiedFunctions.append([x.name for x in m.changed_methods])
 
-        # populate syzbot resources;
-        if len(tasks) > 0:
-            await asyncio.wait(tasks)
         return SyzbotDataset(root=batch)
 
 class SyzbotCrawler(SyzbotDriver):
@@ -404,17 +511,23 @@ class SyzbotCrawler(SyzbotDriver):
             if len(reported) == 0:
                 continue
             reported = reported[0].text
-            if (
-                self._max_reported_days != -1 and
-                reported != 'now' and
-                'd' in reported and
-                int(reported.split('d')[0]) > self._max_reported_days
-            ):
+            reported_days = 1
+            if reported == 'now':
+                reported_days = 0
+            elif 'd' in reported:
+                reported_days = int(reported.split('d')[0])
+            else:
+                reported_days = 1
+            if self._max_reported_days != -1 and reported_days > self._max_reported_days:
                 continue
             if href.find(delimiter) == -1:
                 continue
             _id = href.split(f'?{delimiter}=')[1]
-            ret.append(_id)
+            subsystems = []
+            spans = row.xpath('td')[title_idx].xpath('span')
+            for span in spans:
+                subsystems.append(span.xpath('a')[0].text)
+            ret.append((_id, reported_days, subsystems))
         return ret
 
     async def get_extids(self, thead, tbody):
@@ -425,16 +538,18 @@ class SyzbotCrawler(SyzbotDriver):
 
     async def crawl_open_table(self):
         tr = fromstring((await self._sess_get(
-            url=self._syzbot_url + '/upstream'
+            url=self._syzbot_url + '/upstream',
+            ttl=0
         )).text)
-        fa = tr.xpath("//caption[@id='open']")[0].getparent()
+        fa = tr.xpath("//details")[0].xpath('table')[0]
         thead = fa.xpath('thead/tr')[0]
         tbody = fa.xpath('tbody')[0]
         return await self.get_extids(thead, tbody)
 
     async def crawl_fixed_table(self):
         tr = fromstring((await self._sess_get(
-            url=self._syzbot_url + '/upstream/fixed'
+            url=self._syzbot_url + '/upstream/fixed',
+            ttl=0
         )).text)
         fa = tr.xpath("//table[@class='list_table']")[0]
         thead = fa.xpath('thead/tr')[0]
@@ -449,8 +564,8 @@ class EvaluationResult(BaseModel):
     jobId: JobId
     jobContext: kJobContext
     status: JobStatus
+    evaluation: Literal['notReproduced', 'reproduced', 'compilationError', 'imageError', 'error']
     image: Literal['normal', 'warning', 'error'] | None = None
-    evaluation: Literal['error', 'notReproduced', 'reproduced'] | None = None
     title: str | None = None
     resources: CrashIncident | None = None
 
@@ -501,6 +616,8 @@ class kBench(BaseModel):
     dataset: SyzbotDataset
     kCache: kCacheIndex
 
+    model_config = ConfigDict(extra='allow')
+
     @classmethod
     def load(cls, path: str) -> 'kBench':
         """Load benchmark from JSON file.
@@ -527,11 +644,14 @@ class kBench(BaseModel):
         n_vote: int=5,
         n_worker: int=16,
         only_bug_ids: list[str] | None=None,
+        pbar: bool=True
     ) -> LLMEvaluationResults:
         from concurrent.futures import ThreadPoolExecutor
         from functools import partial
         loop = asyncio.get_running_loop()
         execPool = ThreadPoolExecutor(max_workers=n_worker)
+
+        pgbar = None
 
         async def _eval_llm(bugId: str):
             patch = patches[bugId]
@@ -583,6 +703,8 @@ Make sure you follow the format!""",
                     reasoning_effort=reasoning_effort,
                     temperature=temperature
                 )))
+                if pbar:
+                    pgbar.update(1)
             for r in resps:
                 choice = r.choices[0]
                 ret.replies.append(choice.message.content)
@@ -594,6 +716,13 @@ Make sure you follow the format!""",
                     ret.llmError += 1
             ret.result = 'yes' if ret.yes > ret.no + ret.llmError else 'no'
             return bugId, ret
+
+        if pbar:
+            total = 0
+            for x in self.dataset.root:
+                if only_bug_ids is None or x.bugId in only_bug_ids:
+                    total += n_vote
+            pgbar = tqdm(total=total)
 
         tasks = []
         for x in self.dataset.root:
@@ -615,6 +744,7 @@ Make sure you follow the format!""",
         userspace_image: str | None=None,
         only_bug_ids: list[str] | None=None,
         pbar: bool=True,
+        n_batch: int=1,
         **kwargs
     ) -> dict[str, JobId]:
         """Submit crash reproduction jobs for all bugs in benchmark.
@@ -643,7 +773,6 @@ Make sure you follow the format!""",
             >>> print(f"Submitted {len(receipt)} jobs")
         """
         from .kgym_client import kGymAsyncClient
-        from tqdm import tqdm
         if patches is None:
             patches = dict()
         client: kGymAsyncClient = _client
@@ -660,7 +789,6 @@ Make sure you follow the format!""",
 
                 if isinstance(self.kCache.root[syzbot_data.bugId], JobId):
                     cached_job_ctx = await client.get_job(self.kCache.root[syzbot_data.bugId])
-                    cached_arg: kBuilderArgument = cached_job_ctx.jobWorkers[0].workerArgument
                     cached_result: kBuilderResult = cached_job_ctx.jobWorkers[0].workerResult
                     kCache = cached_result.kCache
                 else:
@@ -672,25 +800,18 @@ Make sure you follow the format!""",
 
                 image: Image | int = 0
                 try:
-                    if 'cached_result' not in locals() or patch != '':
-                        workers.append(kBuilderArgument(
-                            kernelSource=kCache,
-                            userspaceImage=syzbot_data.userspaceImage if userspace_image is None else userspace_image,
-                            patch=patch
-                        ))
-                        image = 0
-                    else:
-                        image = Image(
-                            vmImage=cached_result.vmImage,
-                            vmlinux=cached_result.vmlinux,
-                            arch=cached_result.kernelArch
-                        )
-                        tags['untaintedReproduction'] = f'{syzbot_data.bugId}@{cached_arg.kernelSource.commitId}'
-                    workers.append(kVMManagerArgument.model_from_syzbot_data(
-                        syzbot_data=syzbot_data,
-                        image=image,
-                        **kwargs
+                    workers.append(kBuilderArgument(
+                        kernelSource=kCache,
+                        userspaceImage=syzbot_data.userspaceImage if userspace_image is None else userspace_image,
+                        patch=patch
                     ))
+                    image = 0
+                    for _ in range(n_batch):
+                        workers.append(kVMManagerArgument.model_from_syzbot_data(
+                            syzbot_data=syzbot_data,
+                            image=image,
+                            **kwargs
+                        ))
                     req = kJobRequest(
                         jobWorkers=workers,
                         tags=tags
@@ -718,7 +839,6 @@ Make sure you follow the format!""",
         timeout: int=-1
     ) -> kBenchEvaluationResult | None:
         from .kgym_client import kGymAsyncClient
-        from tqdm import tqdm
         client: kGymAsyncClient = _client
         try:
             # poll;
@@ -748,7 +868,6 @@ Make sure you follow the format!""",
                             prog_bar.update(1)
                 total = total.difference(successful_runs)
                 total = total.difference(unsuccessful_runs)
-            ret = dict[str, EvaluationResult]()
         except KeyboardInterrupt:
             it = receipt
             if pbar:
@@ -758,33 +877,59 @@ Make sure you follow the format!""",
                 await client.abort_job(receipt[bug_id])
             return None
 
+        ret = dict[str, EvaluationResult]()
         for bug_id in receipt:
             job_id: JobId = receipt[bug_id]
             job_ctx = await client.get_job(job_id)
             er = EvaluationResult(
                 jobId=str(job_id),
                 jobContext=job_ctx,
-                status=job_ctx.status
+                status=job_ctx.status,
+                evaluation='error'
             )
             if job_ctx.status != JobStatus.Finished:
+                if (
+                    job_ctx.jobWorkers[0].workerResult.jobException and
+                    job_ctx.jobWorkers[0].workerResult.jobException.code and
+                    job_ctx.jobWorkers[0].workerResult.jobException.code in (
+                        'kbuilder.KernelBuildError',
+                        'kbuilder.PatchApplicationError'
+                    )
+                ):
+                    er.evaluation = 'compilationError'
                 ret[bug_id] = er
                 continue
-            result: kVMManagerResult = job_ctx.jobWorkers[-1].workerResult
-            er.image = result.imageAbility
-            if result.imageAbility == 'error':
-                er.evaluation = 'error'
-            elif result.crashes is None or len(result.crashes) == 0:
-                er.evaluation = 'notReproduced'
+            results = list[kVMManagerResult]()
+            for worker in job_ctx.jobWorkers:
+                if worker.workerType == 'kvmmanager':
+                    results.append(worker.workerResult)
+            # result: kVMManagerResult = job_ctx.jobWorkers[-1].workerResult
+            # check image ability first;
+            er.image = 'error'
+            for result in results:
+                if result.imageAbility == 'normal':
+                    er.image = 'normal'
+                elif result.imageAbility == 'warning' and er.image != 'normal':
+                    er.image = 'warning'
+            if er.image == 'error':
+                er.evaluation = 'imageError'
             else:
-                for crash in result.crashes:
-                    if crash.crashType == 'special':
+                er.evaluation = 'notReproduced'
+                er.resources = None
+                for result in results:
+                    if result.crashes is None:
                         continue
-                    er.evaluation = 'reproduced'
-                    er.title = crash.title
-                    er.resources = crash.incidents[0].model_dump()
-                    break
-                if er.evaluation is None:
-                    er.evaluation = 'error'
+                    found = False
+                    for crash in result.crashes:
+                        if crash.crashType == 'special':
+                            continue
+                        er.evaluation = 'reproduced'
+                        er.title = crash.title
+                        er.resources = crash.incidents[0]
+                        found = True
+                        break
+                    if found:
+                        break
             ret[bug_id] = er
         return kBenchEvaluationResult(root=ret)
 
@@ -796,6 +941,7 @@ Make sure you follow the format!""",
         userspace_image: str | None=None,
         only_bug_ids: list[str] | None=None,
         pbar: bool=True,
+        n_batch: int=1,
         **kwargs
     ) -> kBenchEvaluationResult | None:
         """Complete benchmark evaluation: submit jobs, wait, collect results.
@@ -842,16 +988,26 @@ Make sure you follow the format!""",
             userspace_image,
             only_bug_ids,
             pbar=pbar,
+            n_batch=n_batch,
             **kwargs
         )
         if not receipt:
             return None
-        return await self.poll_kgym_evaluation(
-            _client,
-            receipt,
-            pbar,
-            timeout
-        )
+        for _ in range(10):
+            try:
+                return await self.poll_kgym_evaluation(
+                    _client,
+                    receipt,
+                    pbar,
+                    timeout
+                )
+            except:
+                pass
+        print('Exception occured when polling kGym')
+        Path('./receipt.json').write_bytes(to_json(receipt, indent=4))
+        print(f'Receipt saved as "./receipt.json".')
+        from traceback import print_exc
+        print_exc()
 
     @classmethod
     async def _poll_kcache_job(
@@ -862,7 +1018,7 @@ Make sure you follow the format!""",
         timeout: int=-1
     ) -> Tuple[SyzbotDataset, kCacheIndex]:
         from .kgym_client import kGymAsyncClient
-
+        kcache = deepcopy(kcache)
         client: kGymAsyncClient = _client
 
         cnt = 0
@@ -910,7 +1066,7 @@ Make sure you follow the format!""",
         commit_from: Literal['parent', 'crash']='parent',
         timeout: int=-1,
         **kwargs
-    ) -> 'kBench':
+    ) -> tuple['kBench', kBenchEvaluationResult, kCacheIndex]:
         """Build a benchmark from a Syzbot dataset.
 
         Creates pre-built kernel caches for all bugs in the dataset and
@@ -941,7 +1097,7 @@ Make sure you follow the format!""",
             >>> # Build benchmark from dataset
             >>> dataset = SyzbotDataset.from_hf("repo", "config")
             >>> async with kGymAsyncClient("http://localhost:8000") as client:
-            ...     bench = await kBench.build(
+            ...     bench, eval_result = await kBench.build(
             ...         client,
             ...         dataset,
             ...         userspace_image_name="buildroot.raw",
@@ -956,14 +1112,12 @@ Make sure you follow the format!""",
         from .models import kJobRequest
         from ..kclient_models.kbuilder import kBuilderArgument
         from .kgym_client import kGymAsyncClient
-        from tqdm import tqdm
 
         dataset = deepcopy(dataset)
         client: kGymAsyncClient = _client
         ret = dict()
-        print('Creating kCache...')
         try:
-            for data in tqdm(dataset.root):
+            for data in dataset.root:
                 kbuilder_arg = kBuilderArgument.model_from_syzbot_data(
                     syzbot_data=data,
                     userspace_image_name=userspace_image_name,
@@ -980,13 +1134,17 @@ Make sure you follow the format!""",
                     }
                 )
                 ret[data.bugId] = await client.create_job(req)
-            kcache = kCacheIndex(root=ret)
+            kcache_crude = kCacheIndex(root=ret)
             dataset, kcache = await cls._poll_kcache_job(
                 _client=client,
                 dataset=dataset,
-                kcache=kcache,
+                kcache=kcache_crude,
                 timeout=timeout
             )
+            kcache_failed = {}
+            for bug_id in kcache_crude.root:
+                if bug_id not in kcache.root:
+                    kcache_failed[bug_id] = kcache_crude.root[bug_id]
 
             # filtered out uncompilable builds;
             # now, do reproducibility test;
@@ -994,26 +1152,13 @@ Make sure you follow the format!""",
                 dataset=dataset,
                 kCache=kcache
             )
-            eval_result = (await preliminary_bench.evaluate_kgym(client, timeout=timeout, userspace_image=userspace_image_name, **kwargs)).root
-            successful_bugs = set()
-            for bug_id in eval_result:
-                er = eval_result[bug_id]
-                if er.evaluation is None:
-                    continue
-                if er.evaluation == 'reproduced':
-                    successful_bugs.add(bug_id)
-
+            eval_result = await preliminary_bench.evaluate_kgym(client, timeout=timeout, userspace_image=userspace_image_name, **kwargs)
+            return kBench(
+                dataset=preliminary_bench.dataset.root,
+                kCache=preliminary_bench.kCache
+            ), eval_result, kCacheIndex(root=kcache_failed)
         except KeyboardInterrupt:
             print('Aborting jobs...')
             for bug_id in tqdm(ret):
                 await client.abort_job(ret[bug_id])
             return
-
-        return kBench(
-            dataset=SyzbotDataset(root=list(filter(
-                lambda x: x.bugId in successful_bugs, preliminary_bench.dataset.root
-            ))),
-            kCache=kCacheIndex(root={
-                x: preliminary_bench.kCache.root[x] for x in successful_bugs
-            })
-        )

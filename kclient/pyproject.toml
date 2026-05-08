@@ -17,7 +17,9 @@ dependencies = [
     "lxml",
     "aiolimiter",
     "ipython",
-    "jupyter"
+    "jupyter",
+    "aiosqlite",
+    "aiofiles"
 ]
 
 [project.scripts]
