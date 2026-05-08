@@ -42,3 +42,4 @@ Example:
 from .kgym_client import kGymAsyncClient, kGymClient
 from .kgym_dataset import *
 from .models import *
+from .agentic import kGymAgentClient
