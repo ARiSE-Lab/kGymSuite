@@ -297,8 +297,11 @@ class Worker:
         await self._yield_job.start()
 
         self.job_chan = await self.mq_conn.channel()
-        await self.job_chan.set_qos(prefetch_count=1)
+        await self.job_chan.set_qos(prefetch_count=1, global_=True)
         self.job_queue = await self.job_chan.get_queue(self.worker_type)
+        if 'KGYM_EXCL_QUEUE' in os.environ:
+            self.excl_job_queue = await self.job_chan.get_queue(self.worker_type + '.' + os.environ['KGYM_EXCL_QUEUE'])
+            await self.excl_job_queue.consume(self._on_dispatch)
         await self.job_queue.consume(self._on_dispatch)
 
         await self.report_system_log(f'Worker {self.worker_type} at {self.worker_hostname} joined')

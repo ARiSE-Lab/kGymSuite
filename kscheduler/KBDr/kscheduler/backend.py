@@ -355,9 +355,7 @@ class SchedulerBackend:
                     (request.jobId, nextWorkerIndex)
                 )
                 nextType = await cur.fetchall()
-                if len(nextType) != 0:
-                    ret = [request.jobId, nextType[0][0]]
-                else:
+                if len(nextType) == 0:
                     await cur.execute(
                         "UPDATE jobDigest SET \
                             `status`=? \
@@ -366,6 +364,16 @@ class SchedulerBackend:
                         ;",
                         (JobStatus.Finished, request.jobId)
                     )
+                else:
+                    excl_queue = None
+                    await cur.execute(
+                        "SELECT tagValue FROM jobTag WHERE jobId=? AND tagKey=?",
+                        (request.jobId, 'excl-queue')
+                    )
+                    tagKVpairs = await cur.fetchall()
+                    if len(tagKVpairs) != 0:
+                        excl_queue = tagKVpairs[0][0]
+                    ret = [request.jobId, nextType[0][0], excl_queue]
 
         await self._db_conn.commit()
         return ret

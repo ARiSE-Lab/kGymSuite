@@ -59,7 +59,7 @@ class kGymAsyncClient:
         ...     await client.abort_job(job_id)
     """
 
-    def __init__(self, base_url: str, timeout: float = 30.0, max_connections=5):
+    def __init__(self, base_url: str, timeout: float = 30.0, max_connections: int = 5, excl_queue: str | None = None):
         """Initialize the async client.
 
         Args:
@@ -70,6 +70,7 @@ class kGymAsyncClient:
         self._client = httpx.AsyncClient(base_url=base_url.rstrip('/'), timeout=timeout, limits=httpx.Limits(
             max_connections=max_connections
         ))
+        self._excl_queue = excl_queue
 
     async def close(self):
         """Close the HTTP client and clean up resources.
@@ -157,9 +158,12 @@ class kGymAsyncClient:
             ... )
             >>> job_id = await client.create_job(req)
         """
+        req = job_request.model_dump()
+        if self._excl_queue is not None:
+            req['tags']['excl-queue'] = self._excl_queue
         response = await self._client.post(
             "/newJob",
-            json=job_request.model_dump()
+            json=req
         )
         response.raise_for_status()
         return JobId(response.json())

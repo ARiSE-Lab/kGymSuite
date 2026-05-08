@@ -11,10 +11,13 @@ class SchedulerServer(SchedulerServerBase):
         self._backend = backend
         self._worker_control: WorkerControl = None
 
-    async def enqueue_job(self, job_id: JobId, worker_type: str):
+    async def enqueue_job(self, job_id: JobId, worker_type: str, excl_queue: str | None = None):
+        routing_key = worker_type
+        if excl_queue is not None:
+            routing_key += '.' + excl_queue
         await self._message_chan.default_exchange.publish(
             Message(body=str(job_id).encode('utf-8')),
-            routing_key=worker_type
+            routing_key=routing_key
         )
 
     async def get_system_config(self, request: SystemConfigRequest) -> SystemConfig:
@@ -30,8 +33,8 @@ class SchedulerServer(SchedulerServerBase):
     async def update_job(self, request: JobUpdateRequest) -> None:
         ret = await self._backend.update_job(request)
         if ret:
-            jobId, nextAvailableWorker = ret
-            await self.enqueue_job(jobId, nextAvailableWorker)
+            jobId, nextAvailableWorker, excl_queue = ret
+            await self.enqueue_job(jobId, nextAvailableWorker, excl_queue)
 
     async def mount_apis(self, app: FastAPI):
         @app.post('/jobs/{jobId}/abort')
@@ -64,12 +67,12 @@ class SchedulerServer(SchedulerServerBase):
             if restartFrom >= len(job_context.jobWorkers):
                 raise HTTPException(400, 'Worker index out of bound')
             await self._backend.restart_job(jobId, restartFrom)
-            await self.enqueue_job(jobId, job_context.jobWorkers[restartFrom].workerType)
+            await self.enqueue_job(jobId, job_context.jobWorkers[restartFrom].workerType, job_context.tags.get('excl-queue'))
 
         @app.post('/newJob')
         async def new_job(request: JobRequest) -> JobId:
             job_id = await self._backend.new_job(request)
-            await self.enqueue_job(job_id, request.jobWorkers[0].workerType)
+            await self.enqueue_job(job_id, request.jobWorkers[0].workerType, request.tags.get('excl-queue'))
             return job_id
 
     async def _insert_system_log(self, message: AbstractIncomingMessage):
