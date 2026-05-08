@@ -24,6 +24,7 @@ Example Session:
 
 import os, json, sys, asyncio
 from KBDr.kclient import *
+from KBDr.kclient_models import *
 from pathlib import Path
 from pydantic import BaseModel, RootModel
 from pydantic_core import to_json, from_json
