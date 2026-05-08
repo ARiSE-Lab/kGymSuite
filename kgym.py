@@ -3,17 +3,9 @@ import os, json, asyncio, functools
 import asyncio.subprocess as asp
 from concurrent.futures import ThreadPoolExecutor
 
-async def run(prog, *args):
-    if prog in ('ssh', 'scp'):
-        args = ('-o', 'StrictHostKeyChecking=no', *args)
-    proc = await asp.create_subprocess_exec(
-        prog, *args, stdin=asp.DEVNULL
-    )
-    return await proc.wait()
-
 class RemoteDeployment:
 
-    def __init__(self, deployment_name: str):
+    def __init__(self, deployment_name: str, i):
         self.deployment_name = deployment_name
 
         self.config_path = os.path.join('./deployment', self.deployment_name, 'config.json')
@@ -23,48 +15,72 @@ class RemoteDeployment:
             self.config = json.load(fp)
 
         self.deploy_script_path = './deployment/deploy-new.sh'
+        self.id_key = None
+        if i:
+            self.id_key = i
+
+    async def run(self, prog, *args):
+        if prog in ('ssh', 'scp'):
+            args = ('-o', 'StrictHostKeyChecking=no', *args)
+        if self.id_key:
+            args = ('-i', self.id_key, *args)
+        proc = await asp.create_subprocess_exec(
+            prog, *args, stdin=asp.DEVNULL
+        )
+        return await proc.wait()
 
     async def deploy(self, username: str, hostname: str):
         # deploy-new.sh
         # scp {self.deploy_script_path} {username}@{hostname}:/tmp/deploy-new.sh
         # ssh {username}@{hostname} "chmod +x /tmp/deploy-new.sh && /tmp/deploy-new.sh"
-        assert (await run('scp', './deployment/deploy-new.sh', f'{username}@{hostname}:/tmp/deploy-new.sh')) == 0
-        assert (await run('ssh', f'{username}@{hostname}', 'chmod +x /tmp/deploy-new.sh && /tmp/deploy-new.sh')) == 0
+        assert (await self.run('scp', './deployment/deploy-new.sh', f'{username}@{hostname}:/tmp/deploy-new.sh')) == 0
+        assert (await self.run('ssh', f'{username}@{hostname}', 'chmod +x /tmp/deploy-new.sh && /tmp/deploy-new.sh')) == 0
         await self.update_config(username, hostname)
         print(hostname, 'deployed')
 
     async def bring_up(self, username: str, hostname: str, services: list[str]):
         # ssh {username}@{hostname} "docker compose pull && docker compose up -d {services}"
         _services = ' '.join(services)
-        assert (await run('ssh', f'{username}@{hostname}', f'echo "DEPLOYMENT={self.deployment_name}" > .env && sudo docker compose pull && sudo docker compose up -d {_services}')) == 0
+        assert (await self.run('ssh', f'{username}@{hostname}',
+            (
+                f'echo "DEPLOYMENT={self.deployment_name}" > .env ' + 
+                ''.join([f' && sudo docker compose pull {service} ' for service in services]) +
+                (
+                    f' && sudo docker compose up -d {_services}'
+                    if len(services) > 0 else ''
+                )
+            )
+        )) == 0
         print(hostname, 'brought up')
 
     async def update_config(self, username: str, hostname: str):
         # scp ./deployment/{self.deployment_name}/{config.json,kgym-runner.env,compose.yml} {username}@{hostname}:
-        assert (await run('scp', f'./deployment/{self.deployment_name}/' + 'config.json', f'{username}@{hostname}:')) == 0
-        assert (await run('scp', f'./deployment/{self.deployment_name}/' + 'kgym-runner.env', f'{username}@{hostname}:')) == 0
-        assert (await run('scp', f'./deployment/{self.deployment_name}/' + 'compose.yml', f'{username}@{hostname}:')) == 0
+        assert (await self.run('scp', f'./deployment/{self.deployment_name}/' + 'config.json', f'{username}@{hostname}:')) == 0
+        assert (await self.run('scp', f'./deployment/{self.deployment_name}/' + 'kgym-runner.env', f'{username}@{hostname}:')) == 0
+        assert (await self.run('scp', f'./deployment/{self.deployment_name}/' + 'compose.yml', f'{username}@{hostname}:')) == 0
         print(hostname, 'config updated')
 
     async def bring_down(self, username: str, hostname: str):
         # ssh {username}@{hostname} "sudo docker compose down"
-        assert (await run('ssh', f'{username}@{hostname}', f'echo "DEPLOYMENT={self.deployment_name}" > .env && sudo docker compose down')) == 0
+        assert (await self.run('ssh', f'{username}@{hostname}', f'echo "DEPLOYMENT={self.deployment_name}" > .env && sudo docker compose down')) == 0
         print(hostname, 'brought down')
 
     async def config_ar(self, username: str, hostname: str, server: str):
-        assert (await run('ssh', f'{username}@{hostname}', f'yes | sudo gcloud auth configure-docker {server}')) == 0
+        assert (await self.run('ssh', f'{username}@{hostname}', f'yes | sudo gcloud auth configure-docker {server}')) == 0
 
     async def config_artifact_reg(self, args):
         tasks = []
         for name in self.config['servers']:
             tasks.append(asyncio.create_task(self.config_ar(self.config['servers'][name]['user'], self.config['servers'][name]['hostname'], args.server)))
-        await asyncio.wait(tasks)
+        if len(tasks) > 0:
+            await asyncio.wait(tasks)
 
     async def new_deploy(self, args):
         tasks = []
         for name in self.config['servers']:
             tasks.append(asyncio.create_task(self.deploy(self.config['servers'][name]['user'], self.config['servers'][name]['hostname'])))
-        await asyncio.wait(tasks)
+        if len(tasks) > 0:
+            await asyncio.wait(tasks)
 
     async def down(self, args):
         service_map = {}
@@ -85,7 +101,8 @@ class RemoteDeployment:
                     self.config['servers'][server]['hostname']
                 ))
             )
-        await asyncio.wait(tasks)
+        if len(tasks) > 0:
+            await asyncio.wait(tasks)
         await self.bring_down(
             self.config['servers'][mainServer]['user'],
             self.config['servers'][mainServer]['hostname']
@@ -99,7 +116,8 @@ class RemoteDeployment:
                     self.config['servers'][server]['hostname']
                 ))
             )
-        await asyncio.wait(tasks)
+        if len(tasks) > 0:
+            await asyncio.wait(tasks)
 
     async def upgrade(self, args):
         service_map = {}
@@ -120,7 +138,8 @@ class RemoteDeployment:
                     self.config['servers'][server]['hostname']
                 ))
             )
-        await asyncio.wait(tasks)
+        if len(tasks) > 0:
+            await asyncio.wait(tasks)
         await self.bring_down(
             self.config['servers'][mainServer]['user'],
             self.config['servers'][mainServer]['hostname']
@@ -134,7 +153,8 @@ class RemoteDeployment:
                     self.config['servers'][server]['hostname']
                 ))
             )
-        await asyncio.wait(tasks)
+        if len(tasks) > 0:
+            await asyncio.wait(tasks)
 
         tasks = []
         await self.bring_up(
@@ -152,7 +172,8 @@ class RemoteDeployment:
                     service_map[server]
                 ))
             )
-        await asyncio.wait(tasks)
+        if len(tasks) > 0:
+            await asyncio.wait(tasks)
 
 if __name__ == '__main__':
     import argparse
@@ -160,6 +181,7 @@ if __name__ == '__main__':
         'kgym.py'
     )
     ap.add_argument('deploymentName')
+    ap.add_argument('-i', required=False)
     sp = ap.add_subparsers()
 
     nd = sp.add_parser('new-deploy')
@@ -176,7 +198,7 @@ if __name__ == '__main__':
     car.set_defaults(func=RemoteDeployment.config_artifact_reg)
 
     args = ap.parse_args()
-    rd = RemoteDeployment(args.deploymentName)
+    rd = RemoteDeployment(args.deploymentName, args.i)
 
     async def main(p):
         loop = asyncio.get_running_loop()
