@@ -1,8 +1,9 @@
 # linux_builder.py
-import os, shutil, fcntl, struct, ctypes, asyncio
+import os, shutil, fcntl, struct, ctypes, asyncio, aiofiles, time
 import asyncio.subprocess as asp
 from KBDr.kcore import run_async, JobExceptionError, TaskBase
 from KBDr.kclient_models.kbuilder import *
+from pydantic_core import from_json
 
 def create_loop_info64(
     lo_device: int,
@@ -92,6 +93,8 @@ class LinuxBuilder:
         self.userspace_image_path = userspace_image_path
         self.mount_point = ''
         self.compressed_image_path = ''
+        self.vmlinux_image_path = ''
+        self.build_lock = asyncio.Lock()
 
     async def make_kernel_config(self):
         proc = await asp.create_subprocess_exec(
@@ -158,16 +161,16 @@ class LinuxBuilder:
             )
 
         # submit deliverables;
-        compressed_image_path = os.path.join(self.checkout_path, compressed_image_path)
-        self.build_task.pending_result.kernelImage = await self.build_task.submit_resource(
-            'bzImage', compressed_image_path
-        )
-        vmlinux_image_path = os.path.join(self.checkout_path, 'vmlinux')
-        self.build_task.pending_result.vmlinux = await self.build_task.submit_resource(
-            'vmlinux', vmlinux_image_path
-        )
+        self.compressed_image_path = os.path.join(self.checkout_path, compressed_image_path)
+        self.vmlinux_image_path = os.path.join(self.checkout_path, 'vmlinux')
 
-        self.compressed_image_path = compressed_image_path
+    async def submit_kernel(self):
+        self.build_task.pending_result.kernelImage = await self.build_task.submit_resource(
+            'bzImage', self.compressed_image_path
+        )
+        self.build_task.pending_result.vmlinux = await self.build_task.submit_resource(
+            'vmlinux', self.vmlinux_image_path
+        )
 
     LOOP_CTL_GET_FREE = 0x4c82
     LOOP_SET_FD = 0x4c00
@@ -234,7 +237,17 @@ class LinuxBuilder:
         if self.userspace_image_fd >= 0:
             os.close(self.userspace_image_fd)
         if self.mount_point != '':
-            umount(self.mount_point)
+            ret = -1
+            for _ in range(10):
+                ret = umount(self.mount_point)
+                if ret == 0:
+                    break
+                time.sleep(0.5)
+            if ret < 0:
+                raise JobExceptionError(
+                    'kbuilder.ImageBuildError',
+                    f'Failed to close the userspace image: umount returned {ret}'
+                )
     
     async def make_disk_image(self, kernel_image_path: str):
         await run_async(self.setup_userspace_image_loop_device)
@@ -334,9 +347,14 @@ class LinuxBuilder:
 
     async def make(self):
         await self.make_kernel_config()
-        await self.make_kernel()
-        image_creation_task = asyncio.create_task(self.make_disk_image(self.compressed_image_path))
-        compile_commands_creation_task = asyncio.create_task(self.make_compile_commands())
-        await image_creation_task
-        await compile_commands_creation_task
-        await self.make_cscope()
+
+        async with self.build_lock:
+            _build_time_l = time.time()
+            await self.make_kernel()
+            self.build_task.pending_result.compilationTime = time.time() - _build_time_l
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(self.make_disk_image(self.compressed_image_path))
+            tg.create_task(self.submit_kernel())
+            tg.create_task(self.make_compile_commands())
+            tg.create_task(self.make_cscope())

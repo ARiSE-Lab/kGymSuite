@@ -4,7 +4,7 @@ WORKDIR /
 RUN mkdir /KBDr
 
 # Install pip;
-RUN apt update && apt install python3-pip python3-venv tar gzip zstd pigz cscope libdwarf-dev libdw-dev -y -q
+RUN apt update && apt install python3-pip python3-venv tar gzip zstd pigz cscope libdwarf-dev libdw-dev universal-ctags -y -q
 RUN python3 -m venv venv
 
 # Install kcore & kbuilder;
