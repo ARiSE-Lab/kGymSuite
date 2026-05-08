@@ -114,6 +114,8 @@ class kBuilderArgument(kcore.JobArgument):
         elif not git_url:
             # Default kernel git URL
             git_url = 'https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git'
+        elif git_url.startswith('git://') and git_url.endswith('.git'):
+            git_url = 'https://' + git_url[len('git://'):]
         else:
             raise ValueError(f'Unsupported git URL: {git_url}')
         return git_url
