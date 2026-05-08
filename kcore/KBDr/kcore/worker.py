@@ -88,7 +88,9 @@ class TaskBase:
         self.pending_result = JobResult(workerType=self._worker.worker_type)
         try:
             self.task = asyncio.create_task(self.on_task())
-            result: JobResult = await self.task
+            result: JobResult | None = None
+            async with asyncio.timeout(3600):
+                result = await self.task
             self.task = None
             assert self.pending_result is result
             await self._clean()
@@ -102,6 +104,17 @@ class TaskBase:
                 content=e.content
             )
             self.pending_result.workerException = None
+            return self.pending_result
+        except TimeoutError as e:
+            # yield for others to finish;
+            self.task = None
+            await self._clean()
+            self.pending_result.workerException = WorkerException(
+                code=WorkerYieldedExceptionCode,
+                exceptionType=get_type_fullname(type(e)),
+                traceback=traceback.format_exc()
+            )
+            self.pending_result.jobException = None
             return self.pending_result
         except asyncio.exceptions.CancelledError as e:
             self.task = None
@@ -154,6 +167,8 @@ class Worker:
         self.system_config: SystemConfig = None
         self.storage_backend: AbstractStorageBackend = None
 
+        self.lk = asyncio.Lock()
+
     async def _send_message(self, queue_name: str, message: RootModel):
         await self.job_chan.default_exchange.publish(
             Message(body=message.model_dump_json().encode('utf-8')),
@@ -199,36 +214,37 @@ class Worker:
         self._cancel_job(request.jobId, WorkerYieldedExceptionCode)
 
     async def _on_dispatch(self, message: AbstractIncomingMessage):
-        if self._closed:
+        if self._closed or self.lk.locked():
             await message.reject(True)
             return
 
-        async with message.process(requeue=True):
-            job_id = JobId(message.body.decode('utf-8'))
+        async with self.lk:
+            async with message.process(requeue=True):
+                job_id = JobId(message.body.decode('utf-8'))
 
-            self.system_config = await self.scheduler.get_system_config(SystemConfigRequest(workerType=self.worker_type))
-            ret: JobFocusReceipt = await self.scheduler.focus_job(JobFocusRequest(jobId=job_id, workerHostname=self.worker_hostname))
-            if ret is None or ret.status == JobFocusStatus.rejected:
-                return
-            self.storage_backend: AbstractStorageBackend = await create_storage_backend(self.system_config.storage)
+                self.system_config = await self.scheduler.get_system_config(SystemConfigRequest(workerType=self.worker_type))
+                ret: JobFocusReceipt = await self.scheduler.focus_job(JobFocusRequest(jobId=job_id, workerHostname=self.worker_hostname))
+                if ret is None or ret.status == JobFocusStatus.rejected:
+                    return
+                self.storage_backend: AbstractStorageBackend = await create_storage_backend(self.system_config.storage)
 
-            self.current_task = self._task_type(self, ret.jobContext)
-            result: JobResult = await self.current_task.run()
-            self.current_task = None
-            await self.scheduler.update_job(JobUpdateRequest(
-                workerHostname=self.worker_hostname,
-                workerType=self.worker_type,
-                workerIndex=ret.jobContext.currentWorker,
-                jobId=job_id,
-                deliverable=result
-            ))
+                self.current_task = self._task_type(self, ret.jobContext)
+                result: JobResult = await self.current_task.run()
+                self.current_task = None
+                await self.scheduler.update_job(JobUpdateRequest(
+                    workerHostname=self.worker_hostname,
+                    workerType=self.worker_type,
+                    workerIndex=ret.jobContext.currentWorker,
+                    jobId=job_id,
+                    deliverable=result
+                ))
 
-            if result.workerException is None:
-                return
-            if result.workerException.code != WorkerYieldedExceptionCode:
-                return
-            if self._yield_blocker:
-                await self._yield_blocker.release()
+                if result.workerException is None:
+                    return
+                if result.workerException.code != WorkerYieldedExceptionCode:
+                    return
+                if self._yield_blocker:
+                    await self._yield_blocker.release()
 
     async def _signal_handler(self):
         self._closed = True
