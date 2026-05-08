@@ -294,17 +294,18 @@ class SchedulerBackend:
         jobId=? AND workerIndex=?;
     """
 
-    async def update_job(self, request: JobUpdateRequest) -> Tuple[JobId, str] | None:
+    async def update_job(self, request: JobUpdateRequest) -> Tuple[JobId, str, str | None] | None:
         deliverable = request.deliverable
         yielded = False
         status = JobStatus.Aborted
         nextAvailable = False
         nextWorkerIndex = request.workerIndex
         if deliverable.workerException:
-            exType = deliverable.workerException.exceptionType
+            exType = deliverable.workerException.code
             if exType == WorkerYieldedExceptionCode:
                 yielded = True
                 status = JobStatus.Waiting
+                nextAvailable = True
         elif deliverable.jobException is None:
             status = JobStatus.Waiting
             nextWorkerIndex += 1
