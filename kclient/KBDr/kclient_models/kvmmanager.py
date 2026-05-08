@@ -79,6 +79,7 @@ class Reproducer(BaseModel):
     restartTime: str='10m'
     nInstance: int=1
     threaded: bool=True
+    nProc: int=8
 
 class Image(BaseModel):
     """VM image specification for crash reproduction.

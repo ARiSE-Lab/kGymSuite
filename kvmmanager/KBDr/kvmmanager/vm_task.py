@@ -1,5 +1,5 @@
 # vm_task.py
-import os, aiofiles, json, signal
+import os, aiofiles, json, signal, traceback, asyncio
 import asyncio.subprocess as asp
 from .utils import *
 from functools import reduce
@@ -14,8 +14,6 @@ class VMTask(TaskBase):
     argument: kVMManagerArgument | None=None
 
     async def prepare_resources(self):
-        self.vm_provider, self.vm_type = self.argument.machineType.split(':', maxsplit=1)
-
         if isinstance(self.argument.image, int):
             wid: int = self.argument.image
 
@@ -41,11 +39,24 @@ class VMTask(TaskBase):
             arch = self.argument.image.arch
         else:
             raise JobExceptionError('kvmmanager.InvalidImageError', 'No image provided')
-        # get vmlinux;
-        self.vmlinux_path = os.path.join(self.cwd, 'vmlinux')
-        await self.storage_backend.download_resource(vmlinux_key, self.vmlinux_path)
-        await self.report_job_log('Pulled vmlinux')
         self.arch = arch
+
+        # get vmlinux, and process it;
+        async def _get_vmlinux():
+            self.vmlinux_path = os.path.join(self.cwd, 'vmlinux')
+            await self.storage_backend.download_resource(vmlinux_key, self.vmlinux_path)
+            await self.report_job_log('Pulled vmlinux')
+
+        async def _no_matching_vm_provider():
+            raise JobExceptionError('kvmmanager.InvalidVMProviderError', f'Unsupported VM provider \'{self.vm_provider}\'')
+
+        # better performance;
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(_get_vmlinux())
+            tg.create_task(({
+                'gce': self.prepare_gce,
+                'qemu': self.prepare_qemu
+            }.get(self.vm_provider, _no_matching_vm_provider))())
 
     async def prepare_syzkaller(self, syzkaller_checkout: str, rollback: bool, latest_tag: str):
         from .syzkaller import prepare_syzkaller
@@ -191,29 +202,25 @@ class VMTask(TaskBase):
         self.crush_proc = None
         self.syzkaller_path = os.environ['KVMMANAGER_SYZKALLER_PATH']
         self.image_cleanup_handler = None
-
-        await self.prepare_resources()
+        self.vm_provider, self.vm_type = self.argument.machineType.split(':', maxsplit=1)
+        self.vmlinux_path = None
 
         self.syz_crush_cfg = {
-            'name': f'linux-gce-{self._worker.worker_hostname}',
-            'target': f'linux/{self.arch}',
+            'name': f'{self._worker.system_config.deploymentName}-linux-gce-{self._worker.worker_hostname}',
             'workdir': self.cwd,
             'syzkaller': '',
             'http': ':10000',
             'ssh_user': 'root',
             'type': self.vm_provider,
+            'procs': self.argument.reproducer.nProc,
             'kernel_obj': self.cwd
         }
 
-        await self.prepare_reproducer()
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(self.prepare_resources())
+            tg.create_task(self.prepare_reproducer())
 
-        async def _no_matching_vm_provider():
-            raise JobExceptionError('kvmmanager.InvalidVMProviderError', f'Unsupported VM provider \'{self.vm_provider}\'')
-
-        await ({
-            'gce': self.prepare_gce,
-            'qemu': self.prepare_qemu
-        }.get(self.vm_provider, _no_matching_vm_provider))()
+        self.syz_crush_cfg['target'] = f'linux/{self.arch}'
 
         self.syz_crush_cfg_path = os.path.join(self.cwd, 'crush.cfg')
         async with aiofiles.open(self.syz_crush_cfg_path, 'w') as fp:
@@ -228,11 +235,13 @@ class VMTask(TaskBase):
             '-config', self.syz_crush_cfg_path,
             '-restart_time', self.restart_time,
             '-infinite=false',
+            '-threaded=' + json.dumps(self.argument.reproducer.threaded),
             self.reproducer_path, cwd=self.cwd,
             stdout=await run_async(open, self.syz_crush_log_path, 'w', encoding='utf-8'),
             stderr=asp.STDOUT,
             stdin=asp.DEVNULL
         )
+        # hide latency;
         await self.crush_proc.wait()
         self.crush_proc = None
 
